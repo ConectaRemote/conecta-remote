@@ -124,7 +124,7 @@ internal sealed class InputExecutor
 
     public bool Key(string action, string code)
     {
-        if (!KeyMap.TryGetValue(code, out var virtualKey)) return false;
+        if (!KeyMap.Map.TryGetValue(code, out var virtualKey)) return false;
 
         var extended = KeyMap.IsExtended(code);
         lock (_gate)
