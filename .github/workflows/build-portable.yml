@@ -1,0 +1,125 @@
+name: Build ConectaRemote Portable
+
+# COPIE ESTE ARQUIVO PARA: .github/workflows/build-portable.yml
+# O app não pode gravar dentro de .github/workflows pela permissão da integração GitHub.
+#
+# Gera o pacote portátil em Windows e publica o ZIP + checksums como release.
+# Disparar com tag:  git tag portable-v1.0.0 && git push origin portable-v1.0.0
+on:
+  push:
+    tags:
+      - "portable-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versão do pacote (ex.: 1.0.0). Só gera artefato, não publica release."
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Instalar o .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Mostrar o SDK disponível
+        shell: pwsh
+        run: dotnet --info
+
+      - name: Definir a versão
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -like "portable-v*") {
+            $version = $tag.Substring("portable-v".Length)
+          } elseif ("${{ inputs.version }}") {
+            $version = "${{ inputs.version }}"
+          } else {
+            $version = "1.0.0"
+          }
+          if (-not $version) { $version = "1.0.0" }
+          "value=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "Versao: $version"
+
+      - name: Preparar o certificado de assinatura (opcional)
+        id: certificate
+        shell: pwsh
+        env:
+          CERT_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_BASE64 }}
+        run: |
+          if (-not $env:CERT_BASE64) {
+            Write-Host "Sem certificado configurado: o pacote sera gerado sem assinatura digital."
+            "available=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          $path = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:CERT_BASE64))
+          "path=$path" >> $env:GITHUB_OUTPUT
+          "available=true" >> $env:GITHUB_OUTPUT
+
+      - name: Compilar o pacote portátil
+        shell: pwsh
+        env:
+          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          $buildArgs = @{ Version = "${{ steps.version.outputs.value }}" }
+          if ("${{ steps.certificate.outputs.available }}" -eq "true") {
+            $buildArgs.CertificatePfx = "${{ steps.certificate.outputs.path }}"
+            $buildArgs.CertificatePassword = $env:CERT_PASSWORD
+          }
+          ./src/agent-windows/build-portable.ps1 @buildArgs
+
+      - name: Conferir o conteúdo do pacote
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = "src/agent-windows/dist/ConectaRemotePortable-win-x64.zip"
+          if (-not (Test-Path $zip)) { throw "ZIP nao encontrado em $zip" }
+          $zipPath = (Resolve-Path $zip).Path
+          $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
+          try { $entries = @($archive.Entries | ForEach-Object { $_.FullName }) }
+          finally { $archive.Dispose() }
+          $entries | Sort-Object | ForEach-Object { Write-Host $_ }
+          foreach ($required in @("ConectaRemotePortable.exe", "appsettings.json")) {
+            if (-not ($entries -contains $required)) { throw "Faltou $required dentro do ZIP." }
+          }
+          Write-Host "Pacote completo: executavel e configuracao presentes."
+
+      - name: Guardar o pacote como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: ConectaRemotePortable-win-x64
+          path: |
+            src/agent-windows/dist/ConectaRemotePortable-win-x64.zip
+            src/agent-windows/dist/checksums.txt
+            src/agent-windows/dist/version.txt
+
+      - name: Publicar release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ConectaRemote Portable ${{ steps.version.outputs.value }}
+          tag_name: ${{ github.ref_name }}
+          body: |
+            Pacote portátil para Windows 10 e 11, 64 bits.
+
+            Como usar: baixe o ZIP, extraia em uma pasta e execute ConectaRemotePortable.exe.
+            Não precisa instalar e não exige o .NET na máquina.
+
+            Confira o SHA-256 em checksums.txt antes de executar.
+          files: |
+            src/agent-windows/dist/ConectaRemotePortable-win-x64.zip
+            src/agent-windows/dist/checksums.txt
+            src/agent-windows/dist/version.txt
+          fail_on_unmatched_files: true
